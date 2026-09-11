@@ -1,0 +1,31 @@
+services:
+  shaper:
+    build:
+      context: .
+      target: runtime
+    container_name: jellyfin-library-shaper
+    # Same UID/GID Jellyfin runs as, so "readable to the shaper" means "readable to Jellyfin".
+    user: "1000:1000"
+    restart: unless-stopped
+    environment:
+      SOURCE_DIRS: /media/dump,/media/downloads
+      LIBRARY_DIR: /media/library
+      TMDB_API_KEY: ${TMDB_API_KEY:?set TMDB_API_KEY in .env}
+      SETTLE_SECONDS: "120"
+      DRY_RUN: ${DRY_RUN:-false}
+    volumes:
+      # Container paths must be identical in the Jellyfin container: symlink targets are absolute.
+      - /srv/dump:/media/dump:ro
+      - /mnt/usb/downloads:/media/downloads:ro
+      - /srv/library:/media/library
+      - ./config:/config
+
+# Your existing Jellyfin service needs the same container paths, e.g.:
+#
+#  jellyfin:
+#    image: jellyfin/jellyfin
+#    user: "1000:1000"
+#    volumes:
+#      - /srv/dump:/media/dump:ro
+#      - /mnt/usb/downloads:/media/downloads:ro
+#      - /srv/library:/media/library:ro

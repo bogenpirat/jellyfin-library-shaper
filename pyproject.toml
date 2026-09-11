@@ -1,0 +1,38 @@
+[project]
+name = "jellyfin-library-shaper"
+version = "0.1.0"
+description = "Watches media dump folders and maintains a Jellyfin-shaped tree of symlinks."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "guessit>=4.4.0",
+    "httpx>=0.28.1",
+    "watchdog>=6.0.0",
+]
+
+[project.scripts]
+shaper = "shaper.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shaper"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["linux: needs Linux symlinks/inotify; run inside the test container"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.7",
+]
