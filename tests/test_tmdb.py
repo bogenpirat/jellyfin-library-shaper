@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from shaper.state import State
-from shaper.tmdb import API_BASE, Match, TmdbClient, TmdbError, normalize
+from shaper.tmdb import API_BASE, Match, TmdbClient, TmdbError, normalize, pick_best
 
 TOKEN = "eyJ" + "x" * 60
 
@@ -156,3 +156,87 @@ def test_network_errors_raise() -> None:
     api = FakeApi({"search/movie": boom})
     with pytest.raises(TmdbError):
         api.client().match_movie("The Matrix", 1999)
+
+
+# -- fallback to the file's own language ------------------------------------------------------
+
+SONGBIRDS_EN = {"id": 695721, "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
+                "original_title": "The Hunger Games: The Ballad of Songbirds & Snakes",
+                "release_date": "2023-11-15", "popularity": 90.0}  # fmt: skip
+PANEM_DE = [
+    {**SONGBIRDS_EN, "title": "Die Tribute von Panem – The Ballad of Songbirds and Snakes"},
+    {"id": 70160, "title": "Die Tribute von Panem – The Hunger Games",
+     "original_title": "The Hunger Games", "release_date": "2012-03-12", "popularity": 80.0},
+    {"id": 131631, "title": "Die Tribute von Panem – Mockingjay Teil 1",
+     "original_title": "The Hunger Games: Mockingjay - Part 1", "release_date": "2014-11-18",
+     "popularity": 70.0},
+]  # fmt: skip
+
+
+def by_language(**bodies: dict[str, Any]) -> Any:
+    return lambda r: httpx.Response(200, json=bodies[r.url.params["language"]])
+
+
+def panem_api() -> FakeApi:
+    return FakeApi({
+        "search/movie": by_language(**{"en-US": results(SONGBIRDS_EN), "de": results(*PANEM_DE)}),
+        "movie/695721": SONGBIRDS_EN,
+    })  # fmt: skip
+
+
+def test_localized_title_is_searched_in_the_files_language() -> None:
+    api = panem_api()
+    match = api.client().match_movie("Die Tribute von Panem", 2023, "de")
+    assert match == Match(695721, "The Hunger Games: The Ballad of Songbirds & Snakes", 2023)
+    languages = [(r.url.path.removeprefix("/3/"), r.url.params["language"]) for r in api.requests]
+    assert languages == [
+        ("search/movie", "en-US"), ("search/movie", "en-US"),  # with year filter, then without
+        ("search/movie", "de"),
+        ("movie/695721", "en-US"),  # folder is named in the configured language
+    ]  # fmt: skip
+
+
+def test_localized_main_title_needs_the_exact_year() -> None:
+    # 2015 is within ±1 of Mockingjay Part 1 (2014), but a main-title-only match must be exact.
+    assert panem_api().client().match_movie("Die Tribute von Panem", 2015, "de") is None
+
+
+def test_no_fallback_without_a_foreign_language_tag() -> None:
+    for language in (None, "en"):
+        api = panem_api()
+        assert api.client().match_movie("Die Tribute von Panem", 2023, language) is None
+        assert {r.url.params["language"] for r in api.requests} == {"en-US"}
+
+
+def test_localized_series_title() -> None:
+    en = {"id": 71446, "name": "Money Heist", "original_name": "La casa de papel",
+          "first_air_date": "2017-05-02"}  # fmt: skip
+    api = FakeApi({
+        "search/tv": by_language(
+            **{"en-US": results(en), "de": results({**en, "name": "Haus des Geldes"})}
+        ),
+        "tv/71446": en,
+    })  # fmt: skip
+    assert api.client().match_series("Haus des Geldes", None, None, "de") == Match(
+        71446, "Money Heist", 2017
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "year", "allowed", "expected"),
+    [
+        ("Die Tribute von Panem", 2023, True, 695721),
+        ("Die Tribute von Panem", 2023, False, None),  # only in the language fallback
+        ("Die Tribute von Panem", None, True, None),  # needs a year
+        ("Panem", 2023, True, None),  # needs more than one word
+        ("Die Tribute", 2023, True, None),  # must be the whole main title
+    ],
+)
+def test_main_title_matching(query: str, year: int | None, allowed: bool, expected: int) -> None:
+    best = pick_best(
+        [{**SONGBIRDS_EN, "title": "Die Tribute von Panem – The Ballad of Songbirds and Snakes"},
+         {**SONGBIRDS_EN, "id": 1, "title": "Panem: Something", "original_title": ""}],
+        query, title_keys=("title", "original_title"), date_key="release_date",
+        year=year, year_tolerance=1, main_title_ok=allowed,
+    )  # fmt: skip
+    assert (best or {}).get("id") == expected

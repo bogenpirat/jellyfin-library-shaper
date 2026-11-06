@@ -1,5 +1,8 @@
 """TMDB lookups: canonical title/year/id for movies and series, and air date -> episode number.
 
+A file tagged with another language than TMDB_LANGUAGE (e.g. "German") that finds no match is
+searched again in its own language, because its title is then usually the localized one.
+
 Results (including "no match") are cached in sqlite. Positive results never expire, which keeps
 every episode of a series in the same folder; negative results expire after the configured TTL.
 """
@@ -23,7 +26,10 @@ from .state import State
 API_BASE = "https://api.themoviedb.org/3/"
 MIN_SIMILARITY = 0.85
 MAX_RETRY_AFTER = 30.0
+MIN_PREFIX_WORDS = 2
 _V3_KEY = re.compile(r"^[0-9a-f]{32}$", re.I)
+# Where a subtitle starts: "Title: Subtitle", "Title – Subtitle", "Title - Subtitle".
+_SUBTITLE = re.compile(r"\s*:\s+|\s+[-–—]\s+")
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +55,12 @@ def _year(value: str | None) -> int | None:
     return int(value[:4]) if value and value[:4].isdigit() else None
 
 
+def _main_title(title: str) -> str | None:
+    """The part before the subtitle ("Die Tribute von Panem" of "Die Tribute von Panem – …")."""
+    head = _SUBTITLE.split(title, maxsplit=1)
+    return head[0] if len(head) > 1 else None
+
+
 def pick_best(
     results: Iterable[dict[str, Any]],
     query: str,
@@ -58,19 +70,35 @@ def pick_best(
     year: int | None = None,
     year_tolerance: int | None = None,
     country: str | None = None,
+    main_title_ok: bool = False,
 ) -> dict[str, Any] | None:
     """Best result whose title is close enough to the query (and year, if constrained).
+
+    With `main_title_ok`, a query equal to just the main title of a subtitled result also
+    counts (as the weakest acceptable match), but only with an exact year and a multi-word query:
+    localized releases often drop the subtitle ("Die Tribute von Panem" for "… – The Ballad of
+    Songbirds and Snakes").
 
     Ranked by similarity, then exact year, then origin country, then popularity.
     """
     q = normalize(query)
     best, best_key = None, None
     for r in results:
-        titles = [normalize(r[k]) for k in title_keys if r.get(k)]
+        raw_titles = [r[k] for k in title_keys if r.get(k)]
+        titles = [normalize(t) for t in raw_titles]
         sim = max((difflib.SequenceMatcher(None, q, t).ratio() for t in titles), default=0.0)
+        ry = _year(r.get(date_key))
+        if (
+            sim < MIN_SIMILARITY
+            and main_title_ok
+            and year is not None
+            and ry == year
+            and len(q.split()) >= MIN_PREFIX_WORDS
+            and any(normalize(_main_title(t) or "") == q for t in raw_titles)
+        ):
+            sim = MIN_SIMILARITY
         if sim < MIN_SIMILARITY:
             continue
-        ry = _year(r.get(date_key))
         if (
             year is not None
             and year_tolerance is not None
@@ -116,14 +144,32 @@ class TmdbClient:
 
     # -- public lookups -------------------------------------------------------------------------
 
-    def match_movie(self, title: str, year: int | None) -> Match | None:
-        key = f"movie:{normalize(title)}:{year or ''}"
-        data = self._cached(key, lambda: self._search_movie(title, year))
+    def match_movie(
+        self, title: str, year: int | None, language: str | None = None
+    ) -> Match | None:
+        alt = self._fallback_language(language)
+        key = f"movie:{normalize(title)}:{year or ''}" + (f":{alt}" if alt else "")
+        data = self._cached(
+            key,
+            lambda: (
+                self._search_movie(title, year)
+                or (self._search_movie(title, year, alt) if alt else None)
+            ),
+        )
         return Match(**data) if data else None
 
-    def match_series(self, title: str, year: int | None, country: str | None) -> Match | None:
-        key = f"tv:{normalize(title)}:{year or ''}:{country or ''}"
-        data = self._cached(key, lambda: self._search_tv(title, year, country))
+    def match_series(
+        self, title: str, year: int | None, country: str | None, language: str | None = None
+    ) -> Match | None:
+        alt = self._fallback_language(language)
+        key = f"tv:{normalize(title)}:{year or ''}:{country or ''}" + (f":{alt}" if alt else "")
+        data = self._cached(
+            key,
+            lambda: (
+                self._search_tv(title, year, country)
+                or (self._search_tv(title, year, country, alt) if alt else None)
+            ),
+        )
         return Match(**data) if data else None
 
     def episode_by_air_date(self, series_id: int, air_date: date) -> tuple[int, int] | None:
@@ -133,37 +179,55 @@ class TmdbClient:
 
     # -- searches -------------------------------------------------------------------------------
 
-    def _search_movie(self, title: str, year: int | None) -> dict[str, Any] | None:
+    def _fallback_language(self, language: str | None) -> str | None:
+        """The file's language, if it differs from the configured one (else a retry is moot)."""
+        if not language:
+            return None
+        same = language.split("-")[0].lower() == self._language.split("-")[0].lower()
+        return None if same else language
+
+    def _search_movie(
+        self, title: str, year: int | None, language: str | None = None
+    ) -> dict[str, Any] | None:
+        """Search in the configured language, or (as a fallback) in the file's `language`."""
         # With a year: first ask TMDB to filter by it, then search unfiltered but still require the
         # year within ±1 (festival vs. release year) so "Birthday 2019" can't match any "Birthday".
         for year_param in [year, None] if year else [None]:
-            results = self._get("search/movie", query=title, year=year_param).get("results", [])
+            results = self._get(
+                "search/movie", query=title, year=year_param, language=language
+            ).get("results", [])
             best = pick_best(
                 results, title, title_keys=("title", "original_title"), date_key="release_date",
-                year=year, year_tolerance=1,
+                year=year, year_tolerance=1, main_title_ok=language is not None,
             )  # fmt: skip
             if best:
+                if language:  # name the folder in the configured language, not the file's
+                    best = self._get(f"movie/{best['id']}") or best
                 return asdict(
                     Match(best["id"], best.get("title") or title, _year(best.get("release_date")))
                 )
         return None
 
     def _search_tv(
-        self, title: str, year: int | None, country: str | None
+        self, title: str, year: int | None, country: str | None, language: str | None = None
     ) -> dict[str, Any] | None:
+        """Search in the configured language, or (as a fallback) in the file's `language`."""
         # A year in an episode name is usually, but not reliably, the series' first-air year, so the
         # unfiltered retry drops the year constraint.
         attempts: list[tuple[int | None, int | None]] = [(year, 1)] if year else []
         attempts.append((None, None))
         for year_param, tolerance in attempts:
-            results = self._get("search/tv", query=title, first_air_date_year=year_param).get(
-                "results", []
-            )
+            results = self._get(
+                "search/tv", query=title, first_air_date_year=year_param, language=language
+            ).get("results", [])
             best = pick_best(
                 results, title, title_keys=("name", "original_name"), date_key="first_air_date",
                 year=year_param, year_tolerance=tolerance, country=country,
+                main_title_ok=language is not None,
             )  # fmt: skip
             if best:
+                if language:  # name the folder in the configured language, not the file's
+                    best = self._get(f"tv/{best['id']}") or best
                 return asdict(
                     Match(best["id"], best.get("name") or title, _year(best.get("first_air_date")))
                 )
@@ -203,8 +267,8 @@ class TmdbClient:
         return payload
 
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
-        query = {k: v for k, v in params.items() if v is not None}
-        query |= {"language": self._language, "include_adult": "false", **self._auth_params}
+        query = {"language": self._language, "include_adult": "false"}
+        query |= {k: v for k, v in params.items() if v is not None} | self._auth_params
         for _ in range(4):
             try:
                 resp = self._http.get(path, params=query, headers=self._auth_headers)

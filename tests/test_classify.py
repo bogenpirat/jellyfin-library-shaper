@@ -83,3 +83,21 @@ def test_date_based_episode() -> None:
 )
 def test_ignored(path: str) -> None:
     assert isinstance(classify(path), Ignored)
+
+
+@pytest.mark.parametrize(
+    ("path", "language"),
+    [
+        (
+            "Die.Tribute.von.Panem.2023.German.DL.EAC3D.1080p.BluRay.x264-ZeroTwo/"
+            "Die.Tribute.von.Panem.2023.German.DL.EAC3D.1080p.BluRay.x264-ZeroTwo.mkv",
+            "de",
+        ),
+        ("Haus.des.Geldes.S01E01.German.DL.1080p.WEB.mkv", "de"),
+        ("Movie.Name.2019.MULTi.1080p.mkv", None),
+        ("Movie.Name.2019.1080p.BluRay.x264-GRP.mkv", None),
+    ],
+)
+def test_release_language(path: str, language: str | None) -> None:
+    p = classify(path)
+    assert isinstance(p, ParsedMedia) and p.language == language

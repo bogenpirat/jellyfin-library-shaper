@@ -164,9 +164,13 @@ class Service:
 
     def _resolve(self, p: ParsedMedia) -> Placement | None:
         if p.kind is Kind.MOVIE:
-            match = self.tmdb.match_movie(p.title, p.year) if self.tmdb else None
+            match = self.tmdb.match_movie(p.title, p.year, p.language) if self.tmdb else None
         else:
-            match = self.tmdb.match_series(p.title, p.year, p.country) if self.tmdb else None
+            match = (
+                self.tmdb.match_series(p.title, p.year, p.country, p.language)
+                if self.tmdb
+                else None
+            )
         if match is None and not self.cfg.require_tmdb_match:
             title = string.capwords(p.title) if p.title.islower() else p.title
             match = Match(None, title, p.year)

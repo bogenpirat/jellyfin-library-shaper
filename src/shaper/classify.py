@@ -44,6 +44,7 @@ class ParsedMedia:
     release_group: str | None = None
     edition: str | None = None
     country: str | None = None
+    language: str | None = None  # release language tag, e.g. "de" for "German"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,16 @@ def _first(value: Any) -> Any:
 def _str(value: Any) -> str | None:
     v = _first(value)
     return str(v).strip() or None if v is not None else None
+
+
+def _language(value: Any) -> str | None:
+    """First real language as a TMDB language code ("de", "pt-BR"); skips "mul" (DL) and "und"."""
+    for lang in _as_list(value):
+        code = getattr(lang, "alpha2", None)  # babelfish raises an AttributeError for mul/und
+        if code:
+            region = getattr(getattr(lang, "country", None), "alpha2", None)
+            return f"{code}-{region}" if region else code
+    return None
 
 
 def classify(rel_path: str | PurePosixPath) -> ParsedMedia | Ignored:
@@ -96,6 +107,7 @@ def classify(rel_path: str | PurePosixPath) -> ParsedMedia | Ignored:
         "release_group": _str(g.get("release_group")),
         "edition": _str(g.get("edition")),
         "country": country,
+        "language": _language(g.get("language")),
     }
 
     if g.get("type") == "episode":

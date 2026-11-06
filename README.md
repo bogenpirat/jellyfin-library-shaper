@@ -35,6 +35,12 @@ The dump folders are never modified (they're mounted read-only).
 
   The TMDB check is the real gate: guessit happily turns a home video into a "movie", but it won't
   survive a title match (≥ 85% similar, year within ±1).
+- **Localized titles.** A release tagged with another language than `TMDB_LANGUAGE` (e.g.
+  `Die.Tribute.von.Panem.2023.German.DL…`) that finds no match is searched again in that language.
+  Localized releases often drop the subtitle, so in this retry the parsed title may also equal just the
+  part of the localized title before `:` or ` – `, as long as the year matches exactly and it is more
+  than one word. Folders are still named in `TMDB_LANGUAGE`:
+  `The Hunger Games - The Ballad of Songbirds & Snakes (2023) [tmdbid-695721]`.
 - **Naming** follows the [Jellyfin docs](https://jellyfin.org/docs/general/server/media/movies/). A
   second copy of the same movie or episode becomes a Jellyfin *version*
   (`… - 1080p.mkv`, `… - 2160p.mkv`), and split movies become `-cd1`, `-cd2`. All episodes of a
