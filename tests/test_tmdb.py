@@ -158,6 +158,56 @@ def test_network_errors_raise() -> None:
         api.client().match_movie("The Matrix", 1999)
 
 
+# -- fallback to alternative titles -----------------------------------------------------------
+
+DARK_PHOENIX = {"id": 320288, "title": "Dark Phoenix", "original_title": "Dark Phoenix",
+                "release_date": "2019-05-31", "popularity": 40.0}  # fmt: skip
+PHOENIX_1998 = {"id": 4613, "title": "Phoenix", "original_title": "Phoenix",
+                "release_date": "1998-09-12", "popularity": 5.0}  # fmt: skip
+
+
+def alt_titles(*titles: str) -> dict[str, Any]:
+    return {"titles": [{"iso_3166_1": "US", "title": t, "type": ""} for t in titles]}
+
+
+def dark_phoenix_api() -> FakeApi:
+    return FakeApi({
+        "search/movie": results(DARK_PHOENIX, PHOENIX_1998),
+        "movie/320288/alternative_titles": alt_titles("X-Men: Dark Phoenix", "Dark Phoenix 3D"),
+        "movie/4613/alternative_titles": alt_titles("X-Men Dark Phoenix"),  # must never be asked
+    })  # fmt: skip
+
+
+def lookups(api: FakeApi) -> list[str]:
+    return [r.url.path.removeprefix("/3/") for r in api.requests if "alternative" in r.url.path]
+
+
+def test_title_known_only_as_an_alternative_title() -> None:
+    api = dark_phoenix_api()
+    assert api.client().match_movie("X-Men Dark Phoenix", 2019) == Match(
+        320288, "Dark Phoenix", 2019
+    )
+    assert lookups(api) == ["movie/320288/alternative_titles"]  # once, exact-year results only
+
+
+@pytest.mark.parametrize("year", [None, 2020])
+def test_alternative_titles_need_the_exact_year(year: int | None) -> None:
+    api = dark_phoenix_api()
+    assert api.client().match_movie("X-Men Dark Phoenix", year) is None
+    assert lookups(api) == []
+
+
+def test_alternative_titles_are_not_fetched_for_a_direct_match() -> None:
+    api = dark_phoenix_api()
+    assert api.client().match_movie("Dark Phoenix", 2019) == Match(320288, "Dark Phoenix", 2019)
+    assert lookups(api) == []
+
+
+def test_dissimilar_alternative_titles_do_not_match() -> None:
+    api = dark_phoenix_api()
+    assert api.client().match_movie("X-Men Apocalypse", 2019) is None
+
+
 # -- fallback to the file's own language ------------------------------------------------------
 
 SONGBIRDS_EN = {"id": 695721, "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
@@ -191,6 +241,7 @@ def test_localized_title_is_searched_in_the_files_language() -> None:
     languages = [(r.url.path.removeprefix("/3/"), r.url.params["language"]) for r in api.requests]
     assert languages == [
         ("search/movie", "en-US"), ("search/movie", "en-US"),  # with year filter, then without
+        ("movie/695721/alternative_titles", "en-US"),  # the exact-year result's other names
         ("search/movie", "de"),
         ("movie/695721", "en-US"),  # folder is named in the configured language
     ]  # fmt: skip

@@ -35,6 +35,9 @@ The dump folders are never modified (they're mounted read-only).
 
   The TMDB check is the real gate: guessit happily turns a home video into a "movie", but it won't
   survive a title match (≥ 85% similar, year within ±1).
+- **Alternative titles.** A movie whose TMDB title is shorter than the release name
+  (`X-Men.Dark.Phoenix.2019…` is just "Dark Phoenix" on TMDB) still matches if one of its TMDB
+  alternative titles does, as long as the year matches exactly.
 - **Localized titles.** A release tagged with another language than `TMDB_LANGUAGE` (e.g.
   `Die.Tribute.von.Panem.2023.German.DL…`) that finds no match is searched again in that language.
   Localized releases often drop the subtitle, so in this retry the parsed title may also equal just the

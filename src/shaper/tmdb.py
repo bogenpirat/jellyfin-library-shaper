@@ -3,6 +3,9 @@
 A file tagged with another language than TMDB_LANGUAGE (e.g. "German") that finds no match is
 searched again in its own language, because its title is then usually the localized one.
 
+A movie whose main title doesn't match (with an exact year) may still match one of its
+alternative titles ("X-Men: Dark Phoenix" for "Dark Phoenix").
+
 Results (including "no match") are cached in sqlite. Positive results never expire, which keeps
 every episode of a series in the same folder; negative results expire after the configured TTL.
 """
@@ -27,6 +30,7 @@ API_BASE = "https://api.themoviedb.org/3/"
 MIN_SIMILARITY = 0.85
 MAX_RETRY_AFTER = 30.0
 MIN_PREFIX_WORDS = 2
+MAX_ALT_TITLE_LOOKUPS = 3
 _V3_KEY = re.compile(r"^[0-9a-f]{32}$", re.I)
 # Where a subtitle starts: "Title: Subtitle", "Title – Subtitle", "Title - Subtitle".
 _SUBTITLE = re.compile(r"\s*:\s+|\s+[-–—]\s+")
@@ -53,6 +57,13 @@ def normalize(title: str) -> str:
 
 def _year(value: str | None) -> int | None:
     return int(value[:4]) if value and value[:4].isdigit() else None
+
+
+def _similarity(normalized_query: str, titles: Iterable[str]) -> float:
+    return max(
+        (difflib.SequenceMatcher(None, normalized_query, normalize(t)).ratio() for t in titles),
+        default=0.0,
+    )
 
 
 def _main_title(title: str) -> str | None:
@@ -85,8 +96,7 @@ def pick_best(
     best, best_key = None, None
     for r in results:
         raw_titles = [r[k] for k in title_keys if r.get(k)]
-        titles = [normalize(t) for t in raw_titles]
-        sim = max((difflib.SequenceMatcher(None, q, t).ratio() for t in titles), default=0.0)
+        sim = _similarity(q, raw_titles)
         ry = _year(r.get(date_key))
         if (
             sim < MIN_SIMILARITY
@@ -192,6 +202,7 @@ class TmdbClient:
         """Search in the configured language, or (as a fallback) in the file's `language`."""
         # With a year: first ask TMDB to filter by it, then search unfiltered but still require the
         # year within ±1 (festival vs. release year) so "Birthday 2019" can't match any "Birthday".
+        seen: dict[int, dict[str, Any]] = {}
         for year_param in [year, None] if year else [None]:
             results = self._get(
                 "search/movie", query=title, year=year_param, language=language
@@ -201,12 +212,37 @@ class TmdbClient:
                 year=year, year_tolerance=1, main_title_ok=language is not None,
             )  # fmt: skip
             if best:
-                if language:  # name the folder in the configured language, not the file's
-                    best = self._get(f"movie/{best['id']}") or best
-                return asdict(
-                    Match(best["id"], best.get("title") or title, _year(best.get("release_date")))
-                )
+                return self._movie_match(best, title, language)
+            seen.update((r["id"], r) for r in results if r["id"] not in seen)
+        best = self._by_alternative_title(seen.values(), title, year)
+        return self._movie_match(best, title, language) if best else None
+
+    def _by_alternative_title(
+        self, results: Iterable[dict[str, Any]], title: str, year: int | None
+    ) -> dict[str, Any] | None:
+        """First of the top exact-year results that is also known by (about) `title`.
+
+        TMDB's main title can be shorter than the name a release uses: "Dark Phoenix" is listed
+        with "X-Men: Dark Phoenix" only as an alternative title. Search finds it by that name, but
+        the similarity check against the main title rejects it.
+        """
+        if year is None:
+            return None
+        q = normalize(title)
+        same_year = [r for r in results if _year(r.get("release_date")) == year]
+        for r in same_year[:MAX_ALT_TITLE_LOOKUPS]:
+            alts = self._get(f"movie/{r['id']}/alternative_titles").get("titles", [])
+            if _similarity(q, [a["title"] for a in alts if a.get("title")]) >= MIN_SIMILARITY:
+                return r
         return None
+
+    def _movie_match(
+        self, best: dict[str, Any], title: str, language: str | None
+    ) -> dict[str, Any]:
+        if language:  # name the folder in the configured language, not the file's
+            best = self._get(f"movie/{best['id']}") or best
+        year = _year(best.get("release_date"))
+        return asdict(Match(best["id"], best.get("title") or title, year))
 
     def _search_tv(
         self, title: str, year: int | None, country: str | None, language: str | None = None
